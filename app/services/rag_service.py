@@ -153,9 +153,7 @@ class RAGService:
             search_type="mmr" if self.settings.use_mmr else "similarity",
         )
 
-        docs: List[Document] = await asyncio.to_thread(
-            retriever.get_relevant_documents, question
-        )
+        docs: List[Document] = await retriever.ainvoke(question)
         
         # Early exit if no relevant docs found
         if not docs:
