@@ -14,10 +14,15 @@ from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 
 from app.core.config import Settings
 
-_SYSTEM = """You are a question answering assistant.
-Answer using ONLY the provided context.
-If the answer is not present in the context, respond with exactly: Not found.
-Keep answers concise.
+_SYSTEM = """You are a helpful question answering assistant.
+Use the provided context to answer the question accurately and concisely.
+
+IMPORTANT RULES:
+1. Base your answer on the context provided
+2. If the context contains relevant information, answer the question even if it's not a perfect match
+3. If the answer is clearly not in the context, respond with exactly: Not found
+4. Keep answers concise but complete
+5. You can paraphrase or synthesize information from the context
 """
 
 _PROMPT = ChatPromptTemplate.from_messages(
@@ -62,7 +67,12 @@ class RAGService:
     async def build_index(self, document_text: str) -> FAISS:
         """Async index building with batched embeddings for efficiency."""
         t0 = time.time()
-        chunks = self._splitter.split_text(document_text)
+        
+        # Parse document text to extract page information
+        docs = self._parse_document_to_docs(document_text)
+        
+        # Split documents while preserving metadata
+        chunks = self._splitter.split_documents(docs)
         if not chunks:
             raise ValueError("No chunks created from document")
 
@@ -77,14 +87,11 @@ class RAGService:
             },
         )
 
-        meta_datas = [{"chunk": i} for i in range(len(chunks))]
-
         # Use async embedding generation with automatic batching
         vectorstore = await asyncio.to_thread(
-            FAISS.from_texts,
-            texts=chunks,
+            FAISS.from_documents,
+            documents=chunks,
             embedding=self._embeddings,
-            metadatas=meta_datas,
         )
 
         logger.info(
@@ -145,18 +152,39 @@ class RAGService:
             return self._answer_cache[cache_key]
         
         # Retrieve relevant documents (async to not block)
+        search_kwargs = {
+            "k": self.settings.retrieval_k,
+        }
+        
+        # Only add fetch_k for MMR (it needs a larger pool to select from)
+        if self.settings.use_mmr:
+            search_kwargs["fetch_k"] = self.settings.retrieval_k * 3
+        
         retriever = vectorstore.as_retriever(
-            search_kwargs={
-                "k": self.settings.retrieval_k,
-                "fetch_k": self.settings.retrieval_k * 2,  # Fetch more for MMR
-            },
+            search_kwargs=search_kwargs,
             search_type="mmr" if self.settings.use_mmr else "similarity",
         )
 
         docs: List[Document] = await retriever.ainvoke(question)
         
+        logger.info(
+            "rag_documents_retrieved",
+            extra={
+                "extra": {
+                    "question": question[:100],
+                    "num_docs": len(docs),
+                    "search_type": "mmr" if self.settings.use_mmr else "similarity",
+                    "k": self.settings.retrieval_k,
+                }
+            },
+        )
+        
         # Early exit if no relevant docs found
         if not docs:
+            logger.warning(
+                "rag_no_documents_found",
+                extra={"extra": {"question": question[:100]}}
+            )
             result = {
                 "question": question,
                 "answer": "Not found",
@@ -219,6 +247,54 @@ class RAGService:
         return result
 
     @staticmethod
+    def _parse_document_to_docs(document_text: str) -> List[Document]:
+        """Parse document text into Document objects with page metadata."""
+        docs = []
+        sections = document_text.split("\n\n")
+        current_page = None
+        current_content = []
+        
+        for section in sections:
+            section = section.strip()
+            if not section:
+                continue
+            
+            # Check if this section starts with a page marker
+            if section.startswith("[page "):
+                # Save previous page if exists
+                if current_page and current_content:
+                    docs.append(Document(
+                        page_content="\n\n".join(current_content),
+                        metadata={"source": current_page}
+                    ))
+                    current_content = []
+                
+                # Extract page number and content
+                lines = section.split("\n", 1)
+                current_page = lines[0].strip("[]")
+                if len(lines) > 1:
+                    current_content.append(lines[1])
+            else:
+                # Continue adding to current page
+                current_content.append(section)
+        
+        # Add the last page
+        if current_page and current_content:
+            docs.append(Document(
+                page_content="\n\n".join(current_content),
+                metadata={"source": current_page}
+            ))
+        
+        # If no page markers found, treat entire text as single document
+        if not docs:
+            docs.append(Document(
+                page_content=document_text,
+                metadata={"source": "document"}
+            ))
+        
+        return docs
+    
+    @staticmethod
     def _get_cache_key(question: str) -> str:
         """Generate a cache key for a question."""
         return hashlib.sha256(question.encode()).hexdigest()
@@ -227,7 +303,12 @@ class RAGService:
     def _extract_sources(docs: List[Document]) -> List[str]:
         sources = []
         for d in docs:
-            first_line = (d.page_content.splitlines() or [""])[0].strip()
-            if first_line.startswith("[page "):
-                sources.append(first_line.strip("[]"))
+            # First try to get source from metadata
+            if d.metadata and "source" in d.metadata:
+                sources.append(d.metadata["source"])
+            else:
+                # Fallback to parsing from content
+                first_line = (d.page_content.splitlines() or [""])[0].strip()
+                if first_line.startswith("[page "):
+                    sources.append(first_line.strip("[]"))
         return sorted(set(sources))

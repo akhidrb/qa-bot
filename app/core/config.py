@@ -12,7 +12,7 @@ class Settings(BaseModel):
     # --- Limits & safety ---
     max_questions: int = Field(default=50)
     max_doc_bytes: int = Field(default=10 * 1024 * 1024)  # 10 MB
-    retrieval_k: int = Field(default=4)
+    retrieval_k: int = Field(default=8)  # Increased for better recall
 
     # --- Chunking ---
     chunk_size: int = Field(default=1000)
@@ -20,7 +20,7 @@ class Settings(BaseModel):
     
     # --- Performance optimizations ---
     embedding_batch_size: int = Field(default=100, description="Batch size for embedding generation")
-    use_mmr: bool = Field(default=True, description="Use MMR for diverse retrieval")
+    use_mmr: bool = Field(default=False, description="Use MMR for diverse retrieval (may reduce recall)")
 
 
 @lru_cache
