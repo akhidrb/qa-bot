@@ -218,7 +218,9 @@ class RAGService:
         response = await self._llm.ainvoke(msg)
         answer = response.content.strip()
         llm_ms = int((time.time() - llm_start) * 1000)
-        sources = self._extract_sources(docs)
+        
+        # Only include sources if an actual answer was found
+        sources = self._extract_sources(docs) if answer != "Not found" else []
 
         logger.info(
             "rag_answer_generated",
