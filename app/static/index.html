@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>QA Bot</title>
+    <style>
+        body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; max-width: 900px; margin: 32px auto; padding: 0 16px; }
+        .card { border: 1px solid #ddd; border-radius: 12px; padding: 16px; margin-top: 16px; }
+        label { display: block; margin: 10px 0 6px; font-weight: 600; }
+        input[type="file"] { width: 100%; }
+        button { margin-top: 14px; padding: 10px 14px; border-radius: 10px; border: 0; cursor: pointer; }
+        pre { background: #f7f7f7; padding: 12px; border-radius: 10px; overflow: auto; }
+        .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+        @media (max-width: 800px) { .row { grid-template-columns: 1fr; } }
+        .err { color: #b00020; font-weight: 600; }
+    </style>
+</head>
+
+<body>
+<h1>QA Bot</h1>
+<p>Upload <b>questions_file</b> (JSON list of questions) and <b>document_file</b> (PDF or JSON). Then click “Run”.</p>
+
+<div class="card">
+    <div class="row">
+        <div>
+            <label for="questions_file">questions_file (JSON)</label>
+            <input id="questions_file" type="file" accept=".json,application/json" />
+        </div>
+        <div>
+            <label for="document_file">document_file (PDF or JSON)</label>
+            <input id="document_file" type="file" accept=".pdf,application/pdf,.json,application/json" />
+        </div>
+    </div>
+
+    <button id="runBtn">Run</button>
+    <span id="status"></span>
+    <div id="error" class="err"></div>
+</div>
+
+<div class="card">
+    <h3>Results</h3>
+    <div id="results"></div>
+</div>
+
+<script>
+    const runBtn = document.getElementById("runBtn");
+    const statusEl = document.getElementById("status");
+    const errorEl = document.getElementById("error");
+    const resultsEl = document.getElementById("results");
+
+    function escapeHtml(s) {
+        return s.replace(/[&<>"']/g, (c) => ({
+            "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;"
+        }[c]));
+    }
+
+    runBtn.addEventListener("click", async () => {
+        errorEl.textContent = "";
+        resultsEl.innerHTML = "";
+        statusEl.textContent = "";
+
+        const qFile = document.getElementById("questions_file").files[0];
+        const dFile = document.getElementById("document_file").files[0];
+
+        if (!qFile || !dFile) {
+            errorEl.textContent = "Please choose both questions_file and document_file.";
+            return;
+        }
+
+        const formData = new FormData();
+        formData.append("questions_file", qFile);
+        formData.append("document_file", dFile);
+
+        runBtn.disabled = true;
+        statusEl.textContent = " Running...";
+
+        try {
+            const res = await fetch("/qa", { method: "POST", body: formData });
+
+            const data = await res.json().catch(() => null);
+
+            if (!res.ok) {
+                const detail = data?.detail ? JSON.stringify(data.detail) : "Unknown error";
+                throw new Error(`${res.status} ${res.statusText}: ${detail}`);
+            }
+
+            const results = data.results || [];
+            if (results.length === 0) {
+                resultsEl.innerHTML = "<p>No results returned.</p>";
+                return;
+            }
+
+            resultsEl.innerHTML = results.map((r) => {
+                const sources = (r.sources || []).join(", ");
+                return `
+              <div class="card">
+                <div><b>Q:</b> ${escapeHtml(r.question || "")}</div>
+                <div style="margin-top:8px;"><b>A:</b> ${escapeHtml(r.answer || "")}</div>
+                <div style="margin-top:8px;"><b>Sources:</b> ${escapeHtml(sources)}</div>
+              </div>
+            `;
+            }).join("");
+
+            // also show raw JSON (useful for debugging)
+            const pre = document.createElement("pre");
+            pre.textContent = JSON.stringify(data, null, 2);
+            resultsEl.appendChild(pre);
+
+        } catch (e) {
+            errorEl.textContent = e.message || String(e);
+        } finally {
+            runBtn.disabled = false;
+            statusEl.textContent = "";
+        }
+    });
+</script>
+</body>
+</html>
