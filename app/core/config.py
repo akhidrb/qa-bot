@@ -17,6 +17,10 @@ class Settings(BaseModel):
     # --- Chunking ---
     chunk_size: int = Field(default=1000)
     chunk_overlap: int = Field(default=200)
+    
+    # --- Performance optimizations ---
+    embedding_batch_size: int = Field(default=100, description="Batch size for embedding generation")
+    use_mmr: bool = Field(default=True, description="Use MMR for diverse retrieval")
 
 
 @lru_cache

@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import time
@@ -16,8 +17,11 @@ async def handle_qa(questions_file: UploadFile, document_file: UploadFile) -> QA
     settings = get_settings()
     t0 = time.time()
 
-    q_bytes = await questions_file.read()
-    d_bytes = await document_file.read()
+    # Read files concurrently for efficiency
+    q_bytes, d_bytes = await asyncio.gather(
+        questions_file.read(),
+        document_file.read(),
+    )
 
     logger.info(
         "qa_upload_received",
@@ -32,8 +36,11 @@ async def handle_qa(questions_file: UploadFile, document_file: UploadFile) -> QA
         },
     )
 
-    questions_obj = await parse_questions(q_bytes, settings.max_questions)
-    doc_text = await parse_document(d_bytes, document_file, settings.max_doc_bytes)
+    # Parse questions and document concurrently
+    questions_obj, doc_text = await asyncio.gather(
+        parse_questions(q_bytes, settings.max_questions),
+        parse_document(d_bytes, document_file, settings.max_doc_bytes),
+    )
 
     logger.info(
         "qa_inputs_parsed",
@@ -48,7 +55,7 @@ async def handle_qa(questions_file: UploadFile, document_file: UploadFile) -> QA
     rag_service = RAGService(settings=settings)
     qa_service = QAService(rag_service=rag_service)
 
-    results = qa_service.run(
+    results = await qa_service.run(
         questions=questions_obj,
         document_text=doc_text,
     )

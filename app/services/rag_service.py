@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import logging
 import time
 from typing import Any, Dict, List
@@ -42,8 +44,10 @@ class RAGService:
             chunk_overlap=self.settings.chunk_overlap,
         )
 
+        # Use batching for efficient embeddings
         self._embeddings = OpenAIEmbeddings(
-            model=self.settings.embedding_model
+            model=self.settings.embedding_model,
+            chunk_size=self.settings.embedding_batch_size,
         )
 
         self._llm = ChatOpenAI(
@@ -51,8 +55,12 @@ class RAGService:
             temperature=0,
             timeout=settings.openai_timeout,
         )
+        
+        # Cache for deduplicating identical questions
+        self._answer_cache: Dict[str, Dict[str, Any]] = {}
 
-    def build_index(self, document_text: str) -> FAISS:
+    async def build_index(self, document_text: str) -> FAISS:
+        """Async index building with batched embeddings for efficiency."""
         t0 = time.time()
         chunks = self._splitter.split_text(document_text)
         if not chunks:
@@ -71,6 +79,14 @@ class RAGService:
 
         meta_datas = [{"chunk": i} for i in range(len(chunks))]
 
+        # Use async embedding generation with automatic batching
+        vectorstore = await asyncio.to_thread(
+            FAISS.from_texts,
+            texts=chunks,
+            embedding=self._embeddings,
+            metadatas=meta_datas,
+        )
+
         logger.info(
             "rag_index_built",
             extra={
@@ -80,26 +96,77 @@ class RAGService:
                 }
             },
         )
-        return FAISS.from_texts(
-            texts=chunks,
-            embedding=self._embeddings,
-            metadatas=meta_datas,
-        )
+        return vectorstore
 
-    def answer_many(
+    async def answer_many(
             self, vectorstore: FAISS, questions: List[str]
     ) -> List[Dict[str, Any]]:
-        return [self.answer_one(vectorstore, q) for q in questions]
+        """Process multiple questions concurrently with deduplication and batching."""
+        if not questions:
+            return []
+        
+        # Deduplicate questions to avoid redundant LLM calls
+        unique_questions = list(dict.fromkeys(questions))  # Preserves order
+        logger.info(
+            "rag_batch_processing",
+            extra={
+                "extra": {
+                    "total_questions": len(questions),
+                    "unique_questions": len(unique_questions),
+                    "duplicates_eliminated": len(questions) - len(unique_questions),
+                }
+            },
+        )
+        
+        # Process all unique questions concurrently
+        tasks = [
+            self.answer_one(vectorstore, q)
+            for q in unique_questions
+        ]
+        unique_results = await asyncio.gather(*tasks)
+        
+        # Map results back to original question list (including duplicates)
+        result_map = {r["question"]: r for r in unique_results}
+        return [result_map[q] for q in questions]
 
-    def answer_one(
+    async def answer_one(
             self, vectorstore: FAISS, question: str
     ) -> Dict[str, Any]:
+        """Answer a single question with caching and async execution."""
         t0 = time.time()
+        
+        # Check cache first to avoid unnecessary LLM calls
+        cache_key = self._get_cache_key(question)
+        if cache_key in self._answer_cache:
+            logger.info(
+                "rag_cache_hit",
+                extra={"extra": {"question_len": len(question)}}
+            )
+            return self._answer_cache[cache_key]
+        
+        # Retrieve relevant documents (async to not block)
         retriever = vectorstore.as_retriever(
-            search_kwargs={"k": self.settings.retrieval_k}
+            search_kwargs={
+                "k": self.settings.retrieval_k,
+                "fetch_k": self.settings.retrieval_k * 2,  # Fetch more for MMR
+            },
+            search_type="mmr" if self.settings.use_mmr else "similarity",
         )
 
-        docs: List[Document] = retriever.get_relevant_documents(question)
+        docs: List[Document] = await asyncio.to_thread(
+            retriever.get_relevant_documents, question
+        )
+        
+        # Early exit if no relevant docs found
+        if not docs:
+            result = {
+                "question": question,
+                "answer": "Not found",
+                "sources": [],
+            }
+            self._answer_cache[cache_key] = result
+            return result
+        
         context = "\n\n".join(d.page_content for d in docs).strip()
 
         logger.info(
@@ -121,7 +188,9 @@ class RAGService:
         )
 
         llm_start = time.time()
-        answer = self._llm.invoke(msg).content.strip()
+        # Use async invoke to not block event loop
+        response = await self._llm.ainvoke(msg)
+        answer = response.content.strip()
         llm_ms = int((time.time() - llm_start) * 1000)
         sources = self._extract_sources(docs)
 
@@ -141,12 +210,21 @@ class RAGService:
             },
         )
 
-        return {
+        result = {
             "question": question,
             "answer": answer,
             "sources": sources,
         }
+        
+        # Cache the result
+        self._answer_cache[cache_key] = result
+        return result
 
+    @staticmethod
+    def _get_cache_key(question: str) -> str:
+        """Generate a cache key for a question."""
+        return hashlib.sha256(question.encode()).hexdigest()
+    
     @staticmethod
     def _extract_sources(docs: List[Document]) -> List[str]:
         sources = []

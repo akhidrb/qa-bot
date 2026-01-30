@@ -5,7 +5,7 @@ client = TestClient(app)
 
 
 def test_qa_endpoint(monkeypatch):
-    def fake_run(self, questions, document_text):
+    async def fake_run(self, questions, document_text):
         return [
             {"question": questions[0], "answer": "AWS", "sources": ["page 1"]}
         ]
